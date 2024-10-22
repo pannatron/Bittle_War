@@ -11,7 +11,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'device',
-            default_value='/dev/video0',
+            default_value='/dev/video2',
             description='Video device'
         ),
         DeclareLaunchArgument(
@@ -74,8 +74,8 @@ def generate_launch_description():
         Node(
             package='gscam',
             executable='gscam_node',
-            name='gscam_driver_v4l',
-            namespace='v4l',
+            name='gscam_driver_v4l_3',
+            namespace='v4l3',
             output='screen',
             parameters=[{
                 'camera_name': 'default',

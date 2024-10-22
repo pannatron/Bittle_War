@@ -2,134 +2,248 @@
 
 import rclpy
 from rclpy.node import Node
+from std_msgs.msg import Bool, String,Int32
 from sensor_msgs.msg import Image
-from std_msgs.msg import Bool, String
-from robot_communication_msgs.msg import CircleDetectionParams
 from cv_bridge import CvBridge
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
+from tkinter import Canvas
+
 from PIL import Image as PILImage, ImageTk
 from threading import Thread
 import cv2
+import pygame  
+
 
 class VisionProcessingUI(Node):
     def __init__(self):
         super().__init__('vision_processing_ui')
 
         self.bridge = CvBridge()
-
-        # Subscriber for raw camera image
+        self.rc_count = 0  # เพิ่มค่าเริ่มต้นของ rc_count
+        # Try initializing pygame mixer with error handling
+        try:
+            pygame.mixer.init()
+            print("Pygame mixer initialized successfully.")
+        except Exception as e:
+            print(f"Failed to initialize pygame mixer: {e}")
+        # Subscriber for main camera image
         self.raw_image_subscription = self.create_subscription(
             Image,
-            '/v4l/camera/image_raw',
+            'main_image',
             self.image_callback,
-            10
+            1
         )
 
-        # Subscriber for detected image
-        self.detected_image_subscription = self.create_subscription(
+        # Subscriber for secondary camera image
+        self.second_image_subscription = self.create_subscription(
             Image,
-            '/circle_detection/output_image',
-            self.detected_image_callback,
+            'processed_image',
+            self.second_image_callback,
+            1
+        )
+        # Subscriber for rc_count
+        self.rc_count_subscription = self.create_subscription(
+            Int32,  # Assuming rc_count is published as a String or adjust as per the correct message type
+            '/robot/rc_count',
+            self.rc_count_callback,
             10
         )
+        # Publisher for HP status
+        self.hp_status_publisher = self.create_publisher(String, '/player1/hp_status', 10)
+        # Publisher for player1 ready state
+        self.ready_publisher = self.create_publisher(Bool, '/state/ready_player1', 10)
 
-        # Publisher for auto find circle command
-        self.auto_find_publisher = self.create_publisher(Bool, '/circle_detection/auto_find', 10)
+        # Player 1 ready state (False = Not Ready, True = Ready)
+        self.is_ready = False
 
-        # Publisher for lock field, topview projection, and dangerous zone
-        self.lock_field_publisher = self.create_publisher(Bool, '/circle_detection/lock_field', 10)
-        self.topview_projection_publisher = self.create_publisher(Bool, '/circle_detection/topview_projection', 10)
-        self.dangerous_zone_publisher = self.create_publisher(Bool, '/circle_detection/dangerous_zone', 10)
+        # Publisher for robot command state
+        self.command_publisher = self.create_publisher(String, '/robot/command', 10)
 
-        # Subscriber for robot state
-        self.robot_state_subscription = self.create_subscription(
+        # Subscriber for robot action to highlight corresponding icon
+        self.action_subscription = self.create_subscription(
             String,
-            '/robot/state',
-            self.robot_state_callback,
+            '/robot/action',
+            self.action_callback,
             10
         )
+    def send_command(self, command):
+        """Send command to the robot"""
+        command_msg = String()
+        command_msg.data = command
+        self.command_publisher.publish(command_msg)
+        print(f"Sent command: {command}")
 
-        # Publisher for detection parameters
-        self.param_publisher = self.create_publisher(CircleDetectionParams, '/circle_detection/params', 10)
-
-        # Image status flag
-        self.showing_detected_image = False
-
-        # Robot state string
-        self.robot_state = "Idle"
-
-        # Initialize sliders for HSV and blur parameters
-        self.init_sliders()
-
-    def publish_auto_find(self):
-        auto_find_msg = Bool()
-        auto_find_msg.data = True  # Start auto find circle
-        self.auto_find_publisher.publish(auto_find_msg)
-        self.showing_detected_image = True
-
-    def publish_lock_field(self):
-        lock_field_msg = Bool()
-        lock_field_msg.data = True  # Lock the field
-        self.lock_field_publisher.publish(lock_field_msg)
-
-    def publish_topview_projection(self):
-        topview_msg = Bool()
-        topview_msg.data = True  # Enable topview projection
-        self.topview_projection_publisher.publish(topview_msg)
-
-    def publish_dangerous_zone(self):
-        dangerous_zone_msg = Bool()
-        dangerous_zone_msg.data = True  # Mark dangerous zone
-        self.dangerous_zone_publisher.publish(dangerous_zone_msg)
-
-    def robot_state_callback(self, msg):
-        self.robot_state = msg.data
-        app.update_robot_state(self.robot_state)
-
-    def init_sliders(self):
-        """Initialize the sliders for the various parameters"""
-        self.slider_hue_low = 35
-        self.slider_hue_high = 85
-        self.slider_saturation_low = 50
-        self.slider_saturation_high = 255
-        self.slider_value_low = 50
-        self.slider_value_high = 255
-        self.slider_blur = 5
-
-    def update_params(self):
-        param_msg = CircleDetectionParams()
-        param_msg.hue_low = float(self.slider_hue_low)
-        param_msg.hue_high = float(self.slider_hue_high)
-        param_msg.saturation_low = float(self.slider_saturation_low)
-        param_msg.saturation_high = float(self.slider_saturation_high)
-        param_msg.value_low = float(self.slider_value_low)
-        param_msg.value_high = float(self.slider_value_high)
-        param_msg.blur_size = float(self.slider_blur)
-
-        self.param_publisher.publish(param_msg)
-        print(f'Published parameters: {param_msg}')
+    def action_callback(self, msg):
+        """Callback to highlight the icon based on received action"""
+        app.control_widget.highlight_button(msg.data)
 
     def image_callback(self, msg):
-        if not self.showing_detected_image:
-            frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img_pil = PILImage.fromarray(frame_rgb)
-            img_tk = ImageTk.PhotoImage(image=img_pil)
-            app.update_image(img_tk)
+        """Callback to update the main camera feed"""
+        frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img_pil = PILImage.fromarray(frame_rgb)
+        img_tk = ImageTk.PhotoImage(image=img_pil)
+        app.update_main_image(img_tk)
 
-    def detected_image_callback(self, msg):
-        if self.showing_detected_image:
-            frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img_pil = PILImage.fromarray(frame_rgb)
-            img_tk = ImageTk.PhotoImage(image=img_pil)
-            app.update_image(img_tk)
+    def second_image_callback(self, msg):
+        """Callback to update the secondary camera feed"""
+        frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img_pil = PILImage.fromarray(frame_rgb)
 
-    def update_slider_values(self, param, value):
-        """Update the parameter value and publish changes"""
-        setattr(self, param, value)
-        self.update_params()
+        # Resize the secondary image to 2/8 (or 1/4) of the main image size
+        img_pil = img_pil.resize((int(app.root.winfo_width() / 5), int(app.root.winfo_height() / 5)))
+        img_tk = ImageTk.PhotoImage(image=img_pil)
+        app.update_secondary_image(img_tk)
+    def play_sound_on_ready(self):
+            """Play sound when the ready button is clicked"""
+            try:
+                pygame.mixer.music.load("/home/pure/Desktop/Bittle_War/src/vision_processing/Music/output.wav")  # Path to your sound file
+                pygame.mixer.music.play()
+            except Exception as e:
+                print(f"Error playing sound: {e}")
+    def toggle_ready_state(self):
+        """Toggle the ready state and publish the new state"""
+        self.is_ready = not self.is_ready
+        ready_msg = Bool()
+        ready_msg.data = self.is_ready
+        self.ready_publisher.publish(ready_msg)
+
+        # Update the button color and text based on the state
+        app.update_ready_button(self.is_ready)
+          # Play sound when button is clicked
+        self.play_sound_on_ready()
+
+    def rc_count_callback(self, msg):
+        """Callback to handle RC count"""
+        try:
+            # Increment rc_count by 1 each time message is received
+            self.rc_count += 1
+            deduction = self.rc_count * 20  # Multiply rc_count by 20
+            app.update_hp_after_rc(deduction)  # Update HP in the App class
+            
+            # If the rc_count is 5 (meaning HP is about to end)
+            if self.rc_count == 3:
+                app.current_hp = 0  # HP reaches zero
+                self.publish_hp_status()  # Publish the HP status when HP is zero
+
+                app.update_hp_bar()  # Update the HP bar to reflect that
+
+        except Exception as e:
+            print(f"Error in RC count callback: {e}")
+    def publish_hp_status(self):
+        """Publish the status when HP reaches zero"""
+        status_msg = String()
+        status_msg.data = "Player 1 HP is zero!"
+        self.hp_status_publisher.publish(status_msg)
+        print("Published HP status: Player 1 HP is zero!")
+        
+class ControlWidget:
+    def __init__(self, parent_frame, control_callback):
+        """Widget to handle control buttons"""
+        self.control_callback = control_callback
+
+        # Frame for the icons below the secondary camera
+        self.icon_frame = ttk.Labelframe(parent_frame, text="Control Buttons", padding=10, bootstyle="secondary")
+        self.icon_frame.pack(fill=ttk.X, pady=10)
+
+        # Define custom styles for icon buttons
+        self.default_style = {"bootstyle": "secondary", "padding": 5}
+        self.highlighted_style = {"bootstyle": "warning", "padding": 5}
+
+        # Add icons (e.g., walk, left, right, stop, back) below the secondary camera feed
+        self.walk_icon = self.load_icon("/home/pure/Desktop/Bittle_War/src/vision_processing/handpic/walk.png", (40, 40))
+        self.left_icon = self.load_icon("/home/pure/Desktop/Bittle_War/src/vision_processing/handpic/left.png", (40, 40))
+        self.right_icon = self.load_icon("/home/pure/Desktop/Bittle_War/src/vision_processing/handpic/right.png", (40, 40))
+        self.stop_icon = self.load_icon("/home/pure/Desktop/Bittle_War/src/vision_processing/handpic/stop.png", (40, 40))
+        self.back_icon = self.load_icon("/home/pure/Desktop/Bittle_War/src/vision_processing/handpic/sit.png", (40, 40))
+        self.attack_icon = self.load_icon("/home/pure/Desktop/Bittle_War/src/vision_processing/handpic/attack.png", (100, 100))
+        self.reset_icon = self.load_icon("/home/pure/Desktop/Bittle_War/src/vision_processing/handpic/reset.png", (40, 40))  # เพิ่มรูป Reset
+
+        # Row 1: Walk
+        self.walk_button = ttk.Button(self.icon_frame, image=self.walk_icon, text="Walk", compound=TOP, **self.default_style, command=lambda: self.send_command("walk"))
+        self.walk_button.grid(row=0, column=1, padx=10, pady=5)
+
+        # Row 2: Left, Stop, Right
+        self.left_button = ttk.Button(self.icon_frame, image=self.left_icon, text="Left", compound=TOP, **self.default_style, command=lambda: self.send_command("left"))
+        self.left_button.grid(row=1, column=0, padx=10, pady=5)
+
+        self.stop_button = ttk.Button(self.icon_frame, image=self.stop_icon, text="Stop", compound=TOP, **self.default_style, command=lambda: self.send_command("stop"))
+        self.stop_button.grid(row=1, column=1, padx=10, pady=5)
+
+        self.right_button = ttk.Button(self.icon_frame, image=self.right_icon, text="Right", compound=TOP, **self.default_style, command=lambda: self.send_command("right"))
+        self.right_button.grid(row=1, column=2, padx=10, pady=5)
+
+        # Row 3: Back
+        self.back_button = ttk.Button(self.icon_frame, image=self.back_icon, text="Back", compound=TOP, **self.default_style, command=lambda: self.send_command("back"))
+        self.back_button.grid(row=2, column=1, padx=10, pady=5)
+        # Large Attack button to the right
+        self.attack_button = ttk.Button(self.icon_frame, image=self.attack_icon, text="Attack", compound=TOP, bootstyle="danger", padding=10, command=lambda: self.send_command("attack"))
+        self.attack_button.grid(row=0, column=3, rowspan=2, padx=10, pady=(5, 0))  # ปรับให้ Attack กินพื้นที่ 2 แถว
+
+        # Reset button added below Attack
+# Row 3: Reset button added below Attack
+        self.reset_button = ttk.Button(self.icon_frame, image=self.reset_icon, text="Reset", compound=TOP, **self.default_style, command=self.reset_action)
+        self.reset_button.grid(row=2, column=3, padx=10, pady=(0, 5))  # ปรับ pady ให้อยู่ชิดกับ Attack มากขึ้น
+
+    def load_icon(self, path, size):
+        """Load and resize an icon from file"""
+        img = PILImage.open(path)
+        img = img.resize(size)
+        return ImageTk.PhotoImage(img)
+
+    def send_command(self, command):
+        """Send the selected command"""
+        self.control_callback(command)
+
+    def highlight_button(self, action):
+        """Highlight the button based on action"""
+        buttons = {
+            "walk": self.walk_button,
+            "left": self.left_button,
+            "right": self.right_button,
+            "stop": self.stop_button,
+            "back": self.back_button,
+            "attack": self.attack_button,
+            "reset": self.reset_button,  # เพิ่มปุ่ม Reset เข้าไปในปุ่มที่จะถูก highlight
+
+        }
+
+        # Reset all buttons to default
+        for button in buttons.values():
+            button.config(bootstyle="secondary")
+
+        # Highlight the active button
+        if action in buttons:
+            if buttons[action] == "attack":
+                buttons[action].config(bootstyle="danger")
+            else:
+                buttons[action].config(bootstyle="danger")
+
+    def reset_action(self):
+        """Reset HP, Ready state, and send reset command, with animation"""
+        # Highlight the Reset button for a brief moment (e.g., change color)
+        self.reset_button.config(bootstyle="success")
+        app.root.after(200, lambda: self.reset_button.config(bootstyle=self.default_style['bootstyle']))  # กลับไปเป็นสีเดิมหลังจาก 200 มิลลิวินาที
+
+        # Reset HP to maximum
+        app.current_hp = app.max_hp
+        app.update_hp_bar()  # Update the HP bar to show full health
+
+        # Reset Ready state to Not Ready
+        vision_processing_node.is_ready = False  # ตั้งค่าเป็น Not Ready
+        app.update_ready_button(vision_processing_node.is_ready)  # อัปเดตปุ่ม Ready ให้แสดง "Not Ready"
+
+        # Publish "False" to /state/ready_player1 to notify system that it's not ready
+        ready_msg = Bool()
+        ready_msg.data = False
+        vision_processing_node.ready_publisher.publish(ready_msg)  # ส่งข้อความ False กลับไปที่ ROS
+
+        # Send reset command (optional, if needed)
+        self.send_command("reset")
+
+
 
 
 class App:
@@ -141,115 +255,143 @@ class App:
         self.main_frame = ttk.Frame(self.root, bootstyle="dark")
         self.main_frame.pack(fill=ttk.BOTH, expand=True, padx=10, pady=10)
 
-        # Insert GIF at the top
+        # GIF at the top
         self.insert_gif()
 
-        # Left control panel
-        self.control_frame = ttk.Labelframe(self.main_frame, text="Control Panel", padding=10, bootstyle="primary")
-        self.control_frame.pack(side=ttk.LEFT, fill=ttk.Y, padx=10, pady=10)
+        # Left panel for the small camera feed (secondary camera)
+        self.left_panel = ttk.Labelframe(self.main_frame, text="Controls & Secondary Camera", padding=10, bootstyle="primary")
+        self.left_panel.pack(side=ttk.LEFT, fill=ttk.Y, padx=10, pady=10)
 
-        # Section 1: Robot Actions
-        self.robot_action_frame = ttk.Labelframe(self.control_frame, text="Robot Actions", bootstyle="info")
-        self.robot_action_frame.pack(fill=ttk.X, pady=10)
+        # Create a frame for secondary camera feed
+        self.secondary_image_frame = ttk.Labelframe(self.left_panel, text="Secondary Camera Feed", padding=10, bootstyle="secondary")
+        self.secondary_image_frame.pack(fill=ttk.BOTH, expand=True, padx=10, pady=10)
 
-        # Auto Find Button
-        self.auto_find_button = ttk.Button(
-            self.robot_action_frame, text="Auto Find Circle", bootstyle="success-outline",
-            command=self.auto_find_circle
-        )
-        self.auto_find_button.pack(fill=ttk.X, pady=5)
+        self.secondary_image_label = ttk.Label(self.secondary_image_frame, background="black", foreground="white", relief="solid", borderwidth=2)
+        self.secondary_image_label.pack(fill=ttk.BOTH, expand=True)
 
-        # Lock Field Button
-        self.lock_field_button = ttk.Button(
-            self.robot_action_frame, text="Lock Field", bootstyle="warning-outline",
-            command=self.lock_field
-        )
-        self.lock_field_button.pack(fill=ttk.X, pady=5)
+        # Create control widget for the buttons
+        self.control_widget = ControlWidget(self.left_panel, vision_processing_node.send_command)
 
-        # Topview Projection Button
-        self.topview_projection_button = ttk.Button(
-            self.robot_action_frame, text="Topview Projection", bootstyle="info-outline",
-            command=self.topview_projection
-        )
-        self.topview_projection_button.pack(fill=ttk.X, pady=5)
+        # Create modern styles for the ready button with centered text and modern font
+        style = ttk.Style()
+        style.configure('ReadyDanger.TButton', font=('Arial', 18, 'bold'), padding=20, anchor='center', relief='solid', borderwidth=2, bordercolor='red', foreground='white', background='red')
+        style.configure('ReadySuccess.TButton', font=('Arial', 18, 'bold'), padding=20, anchor='center', relief='solid', borderwidth=2, bordercolor='green', foreground='white', background='green')
 
-        # Dangerous Zone Button
-        self.dangerous_zone_button = ttk.Button(
-            self.robot_action_frame, text="Dangerous Zone", bootstyle="danger-outline",
-            command=self.dangerous_zone
-        )
-        self.dangerous_zone_button.pack(fill=ttk.X, pady=5)
+        # โหลดรูปภาพสำหรับปุ่ม Ready
+        self.ready_icon = self.load_icon("/home/pure/Desktop/Bittle_War/src/vision_processing/handpic/NotReady.png", (50, 50))  # ปรับขนาดตามที่ต้องการ
 
-        # Section 2: Circle Detection Parameters
-        self.param_frame = ttk.Labelframe(self.control_frame, text="Detection Parameters", bootstyle="info")
-        self.param_frame.pack(fill=ttk.X, pady=10)
+        # สร้างสไตล์โมเดิร์นสำหรับปุ่ม Ready
+        style = ttk.Style()
+        style.configure('ReadyDanger.TButton', font=('Arial', 18, 'bold'), padding=20, anchor='center', relief='solid', 
+                        borderwidth=2, bordercolor='red', foreground='white', background='red')
+        style.configure('ReadySuccess.TButton', font=('Arial', 18, 'bold'), padding=20, anchor='center', relief='solid', 
+                        borderwidth=2, bordercolor='green', foreground='white', background='green')
 
-        # HSV Low-High Sliders and blur
-        self.create_slider_with_buttons(self.param_frame, "Hue Low", 0, 179, 35, "slider_hue_low")
-        self.create_slider_with_buttons(self.param_frame, "Hue High", 0, 179, 85, "slider_hue_high")
-        self.create_slider_with_buttons(self.param_frame, "Saturation Low", 0, 255, 50, "slider_saturation_low")
-        self.create_slider_with_buttons(self.param_frame, "Saturation High", 0, 255, 255, "slider_saturation_high")
-        self.create_slider_with_buttons(self.param_frame, "Value Low", 0, 255, 50, "slider_value_low")
-        self.create_slider_with_buttons(self.param_frame, "Value High", 0, 255, 255, "slider_value_high")
-        self.create_slider_with_buttons(self.param_frame, "Blur (Kernel Size)", 1, 25, 5, "slider_blur")
-
-        # Section 3: Robot State Display (Move to the bottom and color adjustments)
-        self.robot_state_label = ttk.Label(
-            self.control_frame, 
-            text="Robot State: Idle", 
-            foreground="red", 
-            font=('Ubuntu', 16, 'bold')  # Red color for robot state and bold font
-        )
-        self.robot_state_label.pack(anchor='w', padx=5, pady=10)
-
-        # Camera Feed
-        self.image_frame = ttk.Labelframe(self.main_frame, text="Camera Feed", padding=10, bootstyle="primary")
+        # Ready button with an image
+        self.ready_button = ttk.Button(self.left_panel, text="Not Ready", style='ReadyDanger.TButton', image=self.ready_icon, 
+                                       compound=LEFT, command=self.toggle_ready)
+        self.ready_button.pack(side=ttk.BOTTOM, pady=20, padx=20, fill=ttk.X)
+        
+        
+        self.image_frame = ttk.Labelframe(self.main_frame, text="Main Camera Feed", padding=10, bootstyle="primary")
         self.image_frame.pack(side=ttk.RIGHT, fill=ttk.BOTH, expand=True, padx=10, pady=10)
+        # Canvas สำหรับแทบ HP (โมเดิร์นสไตล์)
+        self.hp_canvas = Canvas(self.image_frame, height=30, bg="#1e1e1e", highlightthickness=0)
+        self.hp_canvas.pack(fill=ttk.BOTH, expand=False)
 
-        camera_label = ttk.Label(self.image_frame, text="Camera Feed", font=('Ubuntu', 16, 'bold'), foreground="white")
-        camera_label.pack(anchor='w', padx=5, pady=5)
 
-        self.image_label = ttk.Label(self.image_frame, background="black", foreground="white")
-        self.image_label.pack(fill=ttk.BOTH, expand=True)
+        # กำหนดค่า HP เริ่มต้น
+        self.current_hp = 100
+        self.max_hp = 100
+        self.update_hp_bar()  # เรียกฟังก์ชันนี้เพื่อแสดงแทบ HP เริ่มต้น
+        # Right panel for the large camera feed (main camera)
+        
+        self.main_image_label = ttk.Label(self.image_frame, background="black", foreground="white")
+        self.main_image_label.pack(fill=ttk.BOTH, expand=True)
+        
+    def load_icon(self, path, size):
+            """โหลดรูปภาพและปรับขนาด"""
+            img = PILImage.open(path)
+            img = img.resize(size)
+            return ImageTk.PhotoImage(img)
 
-    def create_slider_with_buttons(self, parent, text, from_, to, default, param):
-        frame = ttk.Frame(parent)
-        frame.pack(fill=ttk.X, pady=5)
+    def update_ready_button(self, is_ready):
+        """Update the Ready button color and text based on the state"""
+        if is_ready:
+            # เปลี่ยนสีเป็นเขียวเมื่อ Ready พร้อมจัดตัวอักษรให้อยู่ตรงกลาง
+            self.ready_button.config(text="Ready", style='ReadySuccess.TButton')
+        else:
+            # เปลี่ยนกลับเป็นสีแดงเมื่อ Not Ready
+            self.ready_button.config(text="Not Ready", style='ReadyDanger.TButton')
 
-        label = ttk.Label(frame, text=f"{text}: {default}", foreground="white")
-        label.pack(side=ttk.LEFT, padx=5)
+    def toggle_ready(self):
+        """Toggle the ready state in the node"""
+        vision_processing_node.toggle_ready_state()
+        self.update_ready_button(vision_processing_node.is_ready)
 
-        slider = ttk.Scale(frame, from_=from_, to=to, bootstyle="info", command=lambda value, lbl=label, txt=text: self.update_slider(lbl, txt, value, param))
-        slider.set(default)
-        slider.pack(side=ttk.LEFT, fill=ttk.X, expand=True, padx=5)
+    def update_main_image(self, img_tk):
+        """Update the main camera feed"""
+        self.main_image_label.config(image=img_tk)
+        self.main_image_label.image = img_tk
 
-        minus_button = ttk.Button(frame, text="-", width=3, bootstyle="danger", command=lambda: self.adjust_slider(slider, -1, param))
-        minus_button.pack(side=ttk.LEFT)
-
-        plus_button = ttk.Button(frame, text="+", width=3, bootstyle="success", command=lambda: self.adjust_slider(slider, 1, param))
-        plus_button.pack(side=ttk.LEFT)
-
-    def adjust_slider(self, slider, step, param):
-        current_value = slider.get()
-        new_value = current_value + step
-        slider.set(new_value)
-        vision_processing_node.update_slider_values(param, new_value)
-
-    def update_slider(self, label, text, value, param):
-        label.config(text=f"{text}: {int(float(value))}")
-        vision_processing_node.update_slider_values(param, value)
-
-    def update_robot_state(self, state):
-        self.robot_state_label.config(text=f"Robot State: {state}")
+    def update_secondary_image(self, img_tk):
+        """Update the secondary camera feed"""
+        self.secondary_image_label.config(image=img_tk)
+        self.secondary_image_label.image = img_tk
 
     def insert_gif(self):
-        gif = PILImage.open("/home/borot/Desktop/bittle_ws/src/vision_processing/scripts/AA.gif")  # Replace with your GIF path
+        """Insert a GIF at the top"""
+        gif = PILImage.open("/home/pure/Desktop/Bittle_War/src/vision_processing/scripts/AA.gif")
         self.gif_label = ttk.Label(self.main_frame)
         self.gif_label.pack(side=ttk.TOP, fill=ttk.X, pady=10)
 
         self.update_gif(gif, 0)
+    def update_hp_after_rc(self, deduction):
+        """Update HP based on RC count deduction"""
+        self.current_hp -= deduction  # Deduct HP based on RC count
+        if self.current_hp < 0:
+            self.current_hp = 0  # Ensure HP does not go below zero
+        self.update_hp_bar()  # Update the HP bar to reflect changes
+        print(f"Updated HP: {self.current_hp}")  # Debug message to check HP update
+
+    def update_hp_bar(self):
+        """ฟังก์ชันสำหรับอัพเดทแถบ HP แบบโมเดิร์น"""
+        # ลบกรอบเก่าออก
+        self.hp_canvas.delete("all")
+
+        # คำนวณอัตราส่วนของ HP (ทำให้แถบเล็กลงตาม HP)
+        hp_percentage = self.current_hp / self.max_hp
+
+        # กำหนดสี gradient ตาม HP percentage (เขียว -> แดง)
+        if hp_percentage > 0.5:
+            color = "#00FF88"  # สีเขียวสด
+        elif 0.2 < hp_percentage <= 0.5:
+            color = "#FFD700"  # สีเหลืองทอง
+        else:
+            color = "#FF4500"  # สีส้มแดง
+
+        # คำนวณความกว้างของแถบ HP ตามความกว้างของ Canvas
+        canvas_width = 1280  # ใช้ความกว้างจริงของ Canvas
+        bar_length = canvas_width * hp_percentage
+
+        # วาดแทบ HP ด้วยมุมโค้งและสีตาม HP
+        radius = 15
+
+        # กำหนดเส้นขอบรอบแทบ HP
+        self.hp_canvas.create_rectangle(5, 5, canvas_width - 5, 25, outline="#888888", width=1, tags="border")
+
+        # วาดแทบ HP ด้วย gradient สีและมุมโค้ง
+        self.hp_canvas.create_oval(5, 5, 5 + 2 * radius, 25, fill=color, outline=color)
+        self.hp_canvas.create_oval(bar_length - 2 * radius, 5, bar_length, 25, fill=color, outline=color)
+        self.hp_canvas.create_rectangle(5 + radius, 5, bar_length - radius, 25, fill=color, outline=color)
+
+        # วาดตัวเลขแสดง HP ตรงกลางแถบแบบโมเดิร์น
+        self.hp_canvas.create_text(canvas_width // 2, 15, text=f"{self.current_hp}/{self.max_hp} HP", fill="white", font=("Helvetica", 12, "bold"))
+
+        # อัปเดตการแสดงผลของ Canvas
 
     def update_gif(self, gif, frame_idx):
+        """Update GIF frames"""
         try:
             gif.seek(frame_idx)
             resized_gif = gif.resize((self.root.winfo_width(), 150))
@@ -261,21 +403,6 @@ class App:
         except EOFError:
             self.update_gif(gif, 0)
 
-    def auto_find_circle(self):
-        vision_processing_node.publish_auto_find()
-
-    def lock_field(self):
-        vision_processing_node.publish_lock_field()
-
-    def topview_projection(self):
-        vision_processing_node.publish_topview_projection()
-
-    def dangerous_zone(self):
-        vision_processing_node.publish_dangerous_zone()
-
-    def update_image(self, img_tk):
-        self.image_label.config(image=img_tk)
-        self.image_label.image = img_tk
 
 def ros_spin():
     rclpy.spin(vision_processing_node)
